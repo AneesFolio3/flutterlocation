@@ -14,12 +14,14 @@ import android.content.pm.PackageManager
 import android.os.Binder
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.PluginRegistry
+import java.util.Calendar
 
 const val kDefaultChannelName: String = "Location background service"
 const val kDefaultNotificationTitle: String = "Location background service running"
@@ -59,7 +61,9 @@ class BackgroundNotification(
             ?.setFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
 
         return if (intent != null) {
-            PendingIntent.getActivity(context, 0, intent, PendingIntent.FLAG_IMMUTABLE)
+            PendingIntent.getActivity(context, 0, intent,
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) PendingIntent.FLAG_IMMUTABLE
+                else 0)
         } else {
             null
         }
@@ -71,7 +75,7 @@ class BackgroundNotification(
             val channel = NotificationChannel(
                 channelId,
                 channelName,
-                NotificationManager.IMPORTANCE_NONE
+                NotificationManager.IMPORTANCE_HIGH
             ).apply {
                 lockscreenVisibility = Notification.VISIBILITY_PRIVATE
             }
@@ -86,11 +90,16 @@ class BackgroundNotification(
         val iconId = getDrawableId(options.iconName).let {
             if (it != 0) it else getDrawableId(kDefaultNotificationIconName)
         }
+        val calendar = Calendar.getInstance()
+
         builder = builder
             .setContentTitle(options.title)
             .setSmallIcon(iconId)
             .setContentText(options.subtitle)
             .setSubText(options.description)
+            .setShowWhen(true)
+            .setWhen(calendar.timeInMillis)
+            .setOngoing(true)
 
         builder = if (options.color != null) {
             builder.setColor(options.color).setColorized(true)
@@ -129,6 +138,7 @@ class BackgroundNotification(
 class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResultListener {
     companion object {
         private const val TAG = "FlutterLocationService"
+        private const val WAKELOCK_TAG = "FlutterLocationService::WAKE_LOCK"
 
         private const val REQUEST_PERMISSIONS_REQUEST_CODE: Int = 641
 
@@ -197,7 +207,7 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
     }
 
     fun checkBackgroundPermissions(): Boolean {
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        /*return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             activity?.let {
                 val locationPermissionState = ActivityCompat.checkSelfPermission(
                     it,
@@ -207,11 +217,13 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
             } ?: throw ActivityNotFoundException()
         } else {
             location?.checkPermissions() ?: false
-        }
+        }*/
+
+        return location?.checkPermissions() ?: false
     }
 
     fun requestBackgroundPermissions() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        /* if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             activity?.let {
                 ActivityCompat.requestPermissions(
                     it,
@@ -227,7 +239,12 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
             location?.requestPermissions()
             // result passed to Location reference here won't be needed
             this.result = null
-        }
+        } */
+
+        location?.result = this.result
+        location?.requestPermissions()
+        // result passed to Location reference here won't be needed
+        this.result = null
     }
 
     fun isInForegroundMode(): Boolean = isForeground
@@ -237,6 +254,8 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
             Log.d(TAG, "Service already in foreground mode.")
         } else {
             Log.d(TAG, "Start service in foreground mode.")
+ 
+            acquireLock()
 
             val notification = backgroundNotification!!.build()
             startForeground(ONGOING_NOTIFICATION_ID, notification)
@@ -247,6 +266,7 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
 
     fun disableBackgroundMode() {
         Log.d(TAG, "Stop service in foreground.")
+        releaseLock()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
         } else {
@@ -255,6 +275,25 @@ class FlutterLocationService : Service(), PluginRegistry.RequestPermissionsResul
         }
 
         isForeground = false
+    }
+
+    private fun acquireLock() {
+        (getSystemService(Context.POWER_SERVICE) as PowerManager).run {
+            newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+    }
+
+    private fun releaseLock() {
+        (getSystemService(Context.POWER_SERVICE) as PowerManager).run {
+            newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, WAKELOCK_TAG).apply {
+                if (isHeld) {
+                    release()
+                }
+            }
+        }
     }
 
     fun changeNotificationOptions(options: NotificationOptions): Map<String, Any>? {
